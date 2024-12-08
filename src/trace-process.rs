@@ -1,22 +1,45 @@
 #![feature(iter_array_chunks)]
+#![feature(btree_cursors)]
 
 use csv::{ReaderBuilder, WriterBuilder};
 use itertools::Itertools;
-use std::collections::BTreeMap;
-use std::collections::HashMap;
+use proc_modules::Module;
+use serde::Deserialize;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::BufRead;
+use std::ops::Bound;
 use std::path::Path;
+use std::process::Command;
 
-#[derive(Debug)]
-struct Bio {
-    offset: u64,
-    size: u64,
-    is_metadata: bool,
-    is_flush: bool,
-    is_write: bool,
-    start: u64,
-    end: Option<u64>,
+use trace_explorer::trace::Bio;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Symbol {
+    Column: u32,
+    Discriminator: u32,
+    FileName: String,
+    FunctionName: String,
+    Line: u32,
+    StartAddress: String,
+    StartFileName: String,
+    StartLine: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct LlvmSymbolizerItem {
+    Address: String,
+    ModuleName: String,
+    Symbol: Vec<Symbol>,
+}
+
+impl LlvmSymbolizerItem {
+    fn address_(&self) -> u64 {
+        let stripped = self.Address.strip_prefix("0x").unwrap();
+        u64::from_str_radix(stripped, 16).unwrap()
+    }
 }
 
 fn get_bio() {
@@ -87,7 +110,7 @@ fn process_stack_traces(stack_traces: HashMap<String, usize>) {
     let mut stack_traces: Vec<(String, usize)> = stack_traces.into_iter().collect();
     stack_traces.sort_by_key(|x| x.1);
 
-    let mut addr_to_line: BTreeMap<u64, Option<String>> = BTreeMap::new();
+    let mut addr_to_loc: HashMap<u64, Option<String>> = HashMap::new();
 
     let stack_traces: Vec<_> = stack_traces
         .into_iter()
@@ -95,58 +118,95 @@ fn process_stack_traces(stack_traces: HashMap<String, usize>) {
             stack_trace
                 .split('\n')
                 .filter_map(|x| {
-                    dbg!(x);
                     let addr: u64 = u64::from_str_radix(x, 16).ok()?;
-                    addr_to_line.entry(addr).or_insert(None);
+                    addr_to_loc.entry(addr).or_insert(None);
                     Some(addr)
                 })
                 .collect::<Vec<_>>()
         })
         .collect();
     dbg!(&stack_traces);
-    dbg!(&addr_to_line);
 
     let curr_text_addr = kernel_text_addr();
     dbg!(curr_text_addr);
-    let vmlinux_text_addr = vmlinux_text_addr(Path::new("./vmlinux"));
+    let vmlinux_text_addr = vmlinux_text_addr(Path::new("/home/mike/tmp/modules/vmlinux"));
     dbg!(vmlinux_text_addr);
     let offset = (vmlinux_text_addr as i64 - curr_text_addr as i64) as i64;
-    addr2line(&mut addr_to_line, offset);
+    resolve_addr(&mut addr_to_loc, offset);
 
     let mut writer = WriterBuilder::new()
         .flexible(false)
         .from_writer(std::fs::File::create("stack.csv").unwrap());
+
     for (i, s) in stack_traces.iter().enumerate() {
         let record = [
             i.to_string(),
             s.iter()
-                .map(|x| addr_to_line[x].as_ref().unwrap())
+                .map(|x| addr_to_loc[x].as_ref().unwrap())
                 .join("\n"),
         ];
         writer.write_record(record).unwrap();
     }
 }
 
-fn addr2line(addr_to_line: &mut BTreeMap<u64, Option<String>>, offset: i64) {
-    let output = std::process::Command::new("addr2line")
-        .arg("--functions")
-        .arg("--inlines")
-        .arg("-e")
-        .arg("./vmlinux")
-        .args(
-            addr_to_line
-                .keys()
-                .map(|s| format!("{:#x}", (*s as i64) + offset)),
-        )
-        .output()
-        .unwrap();
-    let output = String::from_utf8(output.stdout).unwrap();
-    let lines = output.split('\n');
-    let results = lines.array_chunks();
-    for ((_, result), [function, source]) in addr_to_line.iter_mut().zip(results) {
-        result.replace(format!("{}\t{}", function, source));
+fn resolve_addr(addr_to_line: &mut HashMap<u64, Option<String>>, vmlinux_offset: i64) {
+    let modules: BTreeMap<u64, Module> = proc_modules::ModuleIter::new()
+        .unwrap()
+        .filter_map(|m| {
+            let m = m.unwrap();
+            Some((m.base?, m))
+        })
+        .collect();
+
+    let mut addr_per_module = HashMap::new();
+    let mut vmlinux_addr = HashSet::new();
+
+    for addr in addr_to_line.keys() {
+        let mut module = modules.upper_bound(Bound::Included(&addr));
+        if let Some((base, module)) = module.prev() {
+            let (_, set) = addr_per_module
+                .entry(module.module.clone())
+                .or_insert_with(|| (-(*base as i64), HashSet::new()));
+            set.insert(*addr);
+        } else {
+            vmlinux_addr.insert(*addr);
+        };
     }
-    dbg!(addr_to_line);
+    addr_per_module.insert("vmlinux".to_string(), (vmlinux_offset, vmlinux_addr));
+
+    for (module, (base, addrs)) in &addr_per_module {
+        let path = format!(
+            "/home/mike/tmp/modules/{}",
+            if module == "vmlinux" {
+                "vmlinux".to_string()
+            } else {
+                format!("{}.ko", module)
+            }
+        );
+        let output = Command::new("llvm-symbolizer")
+            .arg("--output-style=JSON")
+            .arg("--obj")
+            .arg(&path)
+            .args(addrs.iter().map(|x| format!("{:#x}", (*x as i64) + base)))
+            .output()
+            .unwrap();
+        dbg!(&output);
+        let items: Vec<LlvmSymbolizerItem> = serde_json::from_slice(&output.stdout).unwrap();
+        dbg!(&items);
+        for i in items {
+            let addr = ((i.address_() as i64) - base) as u64;
+            let loc = addr_to_line.get_mut(&addr).unwrap();
+            let s = i
+                .Symbol
+                .iter()
+                .map(|x| format!("{}\t{}:{}:{}", x.FunctionName, x.FileName, x.Line, x.Column))
+                .join("\n");
+            dbg!(&s);
+            loc.replace(s);
+        }
+    }
+
+    dbg!(&addr_per_module);
 }
 
 fn vmlinux_text_addr(vmlinux: &Path) -> u64 {
@@ -168,7 +228,7 @@ fn vmlinux_text_addr(vmlinux: &Path) -> u64 {
 fn kernel_text_addr() -> u64 {
     // read file /proc/kallsyms to get the address of stext
     let file = File::open("/proc/kallsyms").unwrap();
-    let mut reader = std::io::BufReader::new(file);
+    let reader = std::io::BufReader::new(file);
     for line in reader.lines() {
         let line = line.unwrap();
         let mut parts = line.split_whitespace();
@@ -199,8 +259,9 @@ fn main() {
                 stack_traces
                     .entry(curr_stack_trace)
                     .or_insert_with(|| {
+                        let ret = stack_trace_id;
                         stack_trace_id += 1;
-                        stack_trace_id
+                        ret
                     })
                     .to_string()
             } else {
