@@ -1,4 +1,6 @@
-#[derive(Debug)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Bio {
     pub offset: u64,
     pub size: u64,
@@ -7,4 +9,5 @@ pub struct Bio {
     pub is_write: bool,
     pub start: u64,
     pub end: Option<u64>,
+    pub stack_trace: usize,
 }

@@ -17,38 +17,38 @@ use trace_explorer::trace::Bio;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct Symbol {
-    Column: u32,
-    Discriminator: u32,
-    FileName: String,
-    FunctionName: String,
-    Line: u32,
-    StartAddress: String,
-    StartFileName: String,
-    StartLine: u32,
+    column: u32,
+    discriminator: u32,
+    file_name: String,
+    function_name: String,
+    line: u32,
+    start_address: String,
+    start_file_name: String,
+    start_line: u32,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct LlvmSymbolizerItem {
-    Address: String,
-    ModuleName: String,
-    Symbol: Vec<Symbol>,
+    address: String,
+    module_name: String,
+    symbol: Vec<Symbol>,
 }
 
 impl LlvmSymbolizerItem {
     fn address_(&self) -> u64 {
-        let stripped = self.Address.strip_prefix("0x").unwrap();
+        let stripped = self.address.strip_prefix("0x").unwrap();
         u64::from_str_radix(stripped, 16).unwrap()
     }
 }
 
-fn get_bio() {
-    let file = File::open("log.csv").unwrap();
+fn get_bio() -> Vec<Bio> {
+    let file = File::open("output.csv").unwrap();
     let mut reader = ReaderBuilder::new().flexible(true).from_reader(file);
 
     let mut bio_list: Vec<Bio> = Vec::new();
 
-    for result in reader.records() {
+    'outer: for result in reader.records() {
         let record = result.unwrap();
         let event_type = &record[0];
 
@@ -68,42 +68,39 @@ fn get_bio() {
                 is_write: record[5].contains("W"),
                 start: timestamp,
                 end: None,
+                stack_trace: record[6].parse().unwrap(),
             };
             bio_list.push(bio);
             println!("start");
             println!("{:?}", bio_list.last().unwrap());
         } else if event_type == "bio_rq_complete" {
-            let offset: u64 = record[3]
-                .parse()
-                .unwrap_or_else(|e| panic!("{:?}", &record[3]));
-            let size: u64 = record[4].parse().unwrap();
-            let is_flush = record[5].contains("F");
-
-            if is_flush {
-                for bio in bio_list.iter_mut().rev() {
-                    if bio.is_flush {
-                        bio.end = Some(timestamp);
-                        println!("end");
-                        println!("{:?}", bio);
-                        break;
+            if let Ok(offset) = record[3].parse() {
+                let size: u64 = record[4].parse().unwrap();
+                if size == 0 {
+                    for bio in bio_list.iter_mut().rev().take(16) {
+                        if bio.offset == offset && bio.is_flush {
+                            bio.end = Some(timestamp);
+                            continue 'outer;
+                        }
                     }
                 }
-            }
 
-            for bio in bio_list.iter_mut() {
-                if bio.end.is_none()
-                    && bio.offset >= offset
-                    && bio.offset + bio.size <= offset + size
-                {
-                    bio.end = Some(timestamp);
-                    println!("end");
-                    println!("{:?}", bio);
+                for bio in bio_list.iter_mut().rev().take(16) {
+                    if bio.end.is_none()
+                        && bio.offset >= offset
+                        && bio.offset + bio.size <= offset + size
+                    {
+                        bio.end = Some(timestamp);
+                    }
                 }
+            } else {
+                continue;
             }
         }
     }
 
     dbg!(&bio_list);
+    bio_list
 }
 
 fn process_stack_traces(stack_traces: HashMap<String, usize>) {
@@ -162,7 +159,7 @@ fn resolve_addr(addr_to_line: &mut HashMap<u64, Option<String>>, vmlinux_offset:
     let mut vmlinux_addr = HashSet::new();
 
     for addr in addr_to_line.keys() {
-        let mut module = modules.upper_bound(Bound::Included(&addr));
+        let mut module = modules.upper_bound(Bound::Included(addr));
         if let Some((base, module)) = module.prev() {
             let (_, set) = addr_per_module
                 .entry(module.module.clone())
@@ -197,9 +194,14 @@ fn resolve_addr(addr_to_line: &mut HashMap<u64, Option<String>>, vmlinux_offset:
             let addr = ((i.address_() as i64) - base) as u64;
             let loc = addr_to_line.get_mut(&addr).unwrap();
             let s = i
-                .Symbol
+                .symbol
                 .iter()
-                .map(|x| format!("{}\t{}:{}:{}", x.FunctionName, x.FileName, x.Line, x.Column))
+                .map(|x| {
+                    format!(
+                        "{}\t{}:{}:{}",
+                        x.function_name, x.file_name, x.line, x.column
+                    )
+                })
                 .join("\n");
             dbg!(&s);
             loc.replace(s);
@@ -270,6 +272,13 @@ fn main() {
         });
         writer.write_record(new_record).unwrap();
     }
+    drop(writer);
 
     process_stack_traces(stack_traces);
+
+    let bio_list = get_bio();
+    // write bio_list to a json file
+    let bio_file = File::create("bio.json").unwrap();
+    serde_json::to_writer(bio_file, &bio_list).unwrap();
+    return;
 }
