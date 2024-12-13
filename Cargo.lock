@@ -1595,6 +1595,7 @@ dependencies = [
 [[package]]
 name = "proc-modules"
 version = "0.1.0"
+source = "git+https://github.com/MikeWalrus/proc-modules.git#478436b851a24b5937eb0d2fbe35e563f27337c4"
 
 [[package]]
 name = "quick-xml"

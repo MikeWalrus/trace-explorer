@@ -229,7 +229,7 @@ fn resolve_addr(addr_to_line: &mut HashMap<u64, Option<String>>, vmlinux_offset:
                 .map(|x| {
                     format!(
                         "{}\t{}:{}:{}",
-                        x.function_name, x.file_name, x.line, x.column
+                        x.function_name, x.start_file_name, x.start_line, x.column
                     )
                 })
                 .join("\n");

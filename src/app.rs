@@ -71,7 +71,10 @@ impl Trace {
                 });
             if let Some(syscall) = self.selected_syscall {
                 let syscall = &self.syscall_list[syscall];
-                ui.label(format!("From syscall start: {} ns", bio.start - syscall.start));
+                ui.label(format!(
+                    "From syscall start: {} ns",
+                    bio.start - syscall.start
+                ));
                 ui.label(format!(
                     "Until syscall end: {} ns",
                     syscall.end.unwrap_or(syscall.start) - bio.end.unwrap_or(bio.start)
@@ -108,11 +111,15 @@ impl Trace {
                 let rel_time = { syscall.start - self.time_origin };
                 return Some(rel_time);
             }
+            if ui.button("Align to").clicked() {
+                self.time_origin = syscall.start;
+                return Some(0);
+            }
         }
         None
     }
 
-    fn new(name: String, bio_json: &Path, stack_trace_csv: &Path) -> Self {
+    fn new(name: String, bio_json: &Path, stack_trace_csv: &Path, syscall_csv: &Path) -> Self {
         // Read the bios
         let bio_file = std::fs::File::open(bio_json).unwrap();
         let bio_list: Vec<Bio> = serde_json::from_reader(bio_file).unwrap();
@@ -147,7 +154,7 @@ impl Trace {
         }
 
         // Load syscalls
-        let syscall_file = std::fs::File::open("syscall.json").unwrap();
+        let syscall_file = std::fs::File::open(syscall_csv).unwrap();
         let syscall_list: Vec<Syscall> = serde_json::from_reader(syscall_file).unwrap();
 
         head_map.extend(
@@ -348,14 +355,16 @@ impl TemplateApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let traces = vec![
             Trace::new(
-                "btrfs-1".to_string(),
-                Path::new("bio.json"),
-                Path::new("stack.csv"),
+                "btrfs".to_string(),
+                Path::new("/home/mike/docs/wisc/os/project/p3/traces/btrfs/bio.json"),
+                Path::new("/home/mike/docs/wisc/os/project/p3/traces/btrfs/stack.csv"),
+                Path::new("/home/mike/docs/wisc/os/project/p3/traces/btrfs/syscall.json"),
             ),
             Trace::new(
                 "btrfs-2".to_string(),
                 Path::new("bio.json"),
                 Path::new("stack.csv"),
+                Path::new("syscall.json"),
             ),
         ];
 
