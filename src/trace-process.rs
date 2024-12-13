@@ -12,7 +12,7 @@ use std::ops::Bound;
 use std::path::Path;
 use std::process::Command;
 
-use trace_explorer::trace::Bio;
+use trace_explorer::trace::{Bio, Syscall, SyscallKind, Write};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -42,11 +42,9 @@ impl LlvmSymbolizerItem {
     }
 }
 
-fn get_bio() -> Vec<Bio> {
+fn parse_trace(bio_list: &mut Vec<Bio>, syscall_list: &mut Vec<Syscall>) {
     let file = File::open("output.csv").unwrap();
     let mut reader = ReaderBuilder::new().flexible(true).from_reader(file);
-
-    let mut bio_list: Vec<Bio> = Vec::new();
 
     'outer: for result in reader.records() {
         let record = result.unwrap();
@@ -57,7 +55,7 @@ fn get_bio() -> Vec<Bio> {
         }
 
         let tid: u64 = record[1].parse().unwrap();
-        let timestamp: u64 = record[2].parse().unwrap();
+        let timestamp: i64 = record[2].parse().unwrap();
 
         if event_type == "bio_queue" {
             let bio = Bio {
@@ -71,13 +69,11 @@ fn get_bio() -> Vec<Bio> {
                 stack_trace: record[6].parse().unwrap(),
             };
             bio_list.push(bio);
-            println!("start");
-            println!("{:?}", bio_list.last().unwrap());
         } else if event_type == "bio_rq_complete" {
             if let Ok(offset) = record[3].parse() {
                 let size: u64 = record[4].parse().unwrap();
                 if size == 0 {
-                    for bio in bio_list.iter_mut().rev().take(16) {
+                    for bio in bio_list.iter_mut().rev().take(32) {
                         if bio.offset == offset && bio.is_flush {
                             bio.end = Some(timestamp);
                             continue 'outer;
@@ -85,7 +81,7 @@ fn get_bio() -> Vec<Bio> {
                     }
                 }
 
-                for bio in bio_list.iter_mut().rev().take(16) {
+                for bio in bio_list.iter_mut().rev().take(32) {
                     if bio.end.is_none()
                         && bio.offset >= offset
                         && bio.offset + bio.size <= offset + size
@@ -96,11 +92,45 @@ fn get_bio() -> Vec<Bio> {
             } else {
                 continue;
             }
+        } else if event_type == "fsync_start" {
+            let syscall = Syscall {
+                kind: SyscallKind::Fsync,
+                start: timestamp,
+                end: None,
+                tid,
+                stats: None,
+            };
+            syscall_list.push(syscall);
+        } else if event_type == "fsync_end" {
+            let syscall = syscall_list
+                .iter_mut()
+                .rev()
+                .find(|x| x.tid == tid && x.end.is_none());
+            if let Some(syscall) = syscall {
+                syscall.end = Some(timestamp);
+            }
+        } else if event_type == "write_start" {
+            let syscall = Syscall {
+                kind: SyscallKind::Write(Write {
+                    offset: record[4].parse().unwrap(),
+                    bytes: record[5].parse().unwrap(),
+                }),
+                start: timestamp,
+                end: None,
+                tid,
+                stats: None,
+            };
+            syscall_list.push(syscall);
+        } else if event_type == "write_end" {
+            let syscall = syscall_list.iter_mut().rev().find(|x| {
+                assert!(matches!(x.kind, SyscallKind::Write(_)));
+                x.tid == tid && x.end.is_none()
+            });
+            if let Some(syscall) = syscall {
+                syscall.end = Some(timestamp);
+            }
         }
     }
-
-    dbg!(&bio_list);
-    bio_list
 }
 
 fn process_stack_traces(stack_traces: HashMap<String, usize>) {
@@ -276,9 +306,12 @@ fn main() {
 
     process_stack_traces(stack_traces);
 
-    let bio_list = get_bio();
+    let mut bio_list = vec![];
+    let mut syscall_list = vec![];
+    parse_trace(&mut bio_list, &mut syscall_list);
     // write bio_list to a json file
     let bio_file = File::create("bio.json").unwrap();
     serde_json::to_writer(bio_file, &bio_list).unwrap();
-    return;
+    let syscall_file = File::create("syscall.json").unwrap();
+    serde_json::to_writer(syscall_file, &syscall_list).unwrap();
 }
