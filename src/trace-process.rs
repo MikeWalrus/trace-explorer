@@ -210,6 +210,36 @@ fn resolve_addr(addr_to_line: &mut HashMap<u64, Option<String>>, vmlinux_offset:
                 format!("{}.ko", module)
             }
         );
+        let output = Command::new("addr2line")
+            .arg("--functions")
+            .arg("--inlines")
+            .arg("--addresses")
+            .arg("-e")
+            .arg(&path)
+            .args(addrs.iter().map(|x| format!("{:#x}", (*x as i64) + base)))
+            .output()
+            .unwrap();
+        let output = String::from_utf8(output.stdout).unwrap();
+        dbg!(&output);
+        let mut lines = output.lines().peekable();
+        while let Some(addr) = lines.next() {
+            let addr_striped = addr.strip_prefix("0x").unwrap();
+            let addr = u64::from_str_radix(addr_striped, 16).unwrap();
+            let addr = (addr as i64 - base) as u64;
+
+            let mut loc = String::new();
+            while let Some(next_line) = lines.peek() {
+                if next_line.starts_with("0x") {
+                    break;
+                }
+                let function = lines.next().unwrap();
+                let file = lines.next().unwrap();
+                loc.push_str(&format!("{}\t{}\n", function, file));
+            }
+            loc.pop(); // remove the last newline
+            *addr_to_line.get_mut(&addr).unwrap() = Some(loc);
+        }
+        /*
         let output = Command::new("llvm-symbolizer")
             .arg("--output-style=JSON")
             .arg("--obj")
@@ -236,6 +266,7 @@ fn resolve_addr(addr_to_line: &mut HashMap<u64, Option<String>>, vmlinux_offset:
             dbg!(&s);
             loc.replace(s);
         }
+        */
     }
 
     dbg!(&addr_per_module);

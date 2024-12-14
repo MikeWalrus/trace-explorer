@@ -643,7 +643,7 @@ impl eframe::App for TemplateApp {
 
             ui.horizontal(|ui| {
                 ui.label("Zoom:");
-                ui.add(egui::Slider::new(&mut self.zoom, 0.000001..=0.0001).text("zoom"));
+                ui.add(egui::Slider::new(&mut self.zoom, 0.000001..=0.01).text("zoom"));
             });
 
             ui.separator();
